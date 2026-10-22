@@ -1,0 +1,28 @@
+{
+  "name": "network-protocol",
+  "version": "1.0.0",
+  "description": "Design, implement, review and debug network protocols (TCP/UDP/QUIC/TLS/WebSockets), packet analysis, cloud/Kubernetes networking and networking-certification study aid.",
+  "author": {
+    "name": "TheFoxOverflow",
+    "url": "https://github.com/TheFoxOverflow"
+  },
+  "homepage": "https://github.com/TheFoxOverflow/network-protocol-skill",
+  "repository": "https://github.com/TheFoxOverflow/network-protocol-skill",
+  "keywords": [
+    "networking",
+    "protocol",
+    "tcp",
+    "udp",
+    "quic",
+    "tls",
+    "websockets",
+    "wireshark",
+    "tcpdump",
+    "kubernetes",
+    "aws",
+    "gcp",
+    "ccna",
+    "subnetting"
+  ],
+  "license": "MIT"
+}
