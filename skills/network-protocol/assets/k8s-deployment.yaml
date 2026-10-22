@@ -1,0 +1,129 @@
+# k8s-deployment.yaml — deploying the NPRO reference server (assets/framed_protocol.py)
+# on Kubernetes with the production-readiness concepts wired in. Adjust image, names, and
+# limits for your environment. See references/cloud-and-orchestration.md §7.
+#
+# Validate locally:  kubectl apply --dry-run=client -f k8s-deployment.yaml
+#
+# What to notice (each maps to a section of the skill):
+#   * terminationGracePeriodSeconds >= the server's drain_timeout, so SIGTERM-triggered
+#     graceful drain (Server.shutdown) can finish in-flight connections before SIGKILL.
+#   * preStop sleep removes the Pod from Service endpoints BEFORE it stops accepting,
+#     closing the race where the load balancer still sends new connections.
+#   * readinessProbe gates Service routing; livenessProbe is deliberately lenient so a
+#     merely-busy Pod is not killed.
+#   * NetworkPolicy makes the app default-deny and allows only the client + DNS.
+#   * limits/timeouts are passed as env (externalized config), not baked into the image.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: npro-server
+  labels: { app: npro-server }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: npro-server }
+  template:
+    metadata:
+      labels: { app: npro-server }
+    spec:
+      # Must be >= the server's drain_timeout (default 30s) so the drain completes.
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: server
+          image: your-registry/npro-server:1.0.0
+          ports:
+            - name: npro
+              containerPort: 9000
+          # Externalized limits/timeouts (cloud-and-orchestration §1; production-readiness §5).
+          env:
+            - { name: NPRO_MAX_CONNECTIONS,        value: "1000" }
+            - { name: NPRO_MAX_CONNECTIONS_PER_IP, value: "50" }
+            - { name: NPRO_IDLE_TIMEOUT,           value: "60" }
+            - { name: NPRO_HANDSHAKE_TIMEOUT,      value: "10" }
+            - { name: NPRO_DRAIN_TIMEOUT,          value: "30" }
+          # Remove the Pod from endpoints, then pause briefly before SIGTERM so in-flight
+          # routing settles. The server still drains on SIGTERM regardless.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+          # Readiness gates Service routing: a Pod that isn't ready receives no new
+          # connections. Map this to "bound, warmed up, below the connection cap".
+          readinessProbe:
+            tcpSocket: { port: npro }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 2
+          # Liveness restarts a wedged Pod — lenient thresholds so a busy (not dead) Pod
+          # is not killed (cloud-and-orchestration §7).
+          livenessProbe:
+            tcpSocket: { port: npro }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 4
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            # Memory limit should exceed max_connections x (max_payload + queue);
+            # see production-readiness §4.
+            limits:   { cpu: "1",    memory: "512Mi" }
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: npro-server
+  labels: { app: npro-server }
+  annotations:
+    # Use an L4 / passthrough load balancer for a raw binary protocol — NOT an L7/Ingress
+    # (cloud-and-orchestration §2). Example AWS annotation for an NLB:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    # If you rely on the per-IP cap, preserve the client IP (or use PROXY protocol) so the
+    # server sees real client addresses, not the LB's (cloud-and-orchestration §4).
+spec:
+  type: LoadBalancer
+  selector: { app: npro-server }
+  ports:
+    - name: npro
+      port: 9000
+      targetPort: npro
+      protocol: TCP
+---
+# For peer-to-peer or stateful protocols where clients must address individual Pods, use a
+# headless Service instead so DNS returns each Pod IP (cloud-and-orchestration §7).
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: npro-server-headless
+# spec:
+#   clusterIP: None
+#   selector: { app: npro-server }
+#   ports:
+#     - { name: npro, port: 9000, targetPort: npro, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: npro-server
+spec:
+  podSelector:
+    matchLabels: { app: npro-server }
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Allow the protocol port only from designated client Pods (default-deny otherwise).
+    - from:
+        - podSelector:
+            matchLabels: { role: npro-client }
+      ports:
+        - { port: 9000, protocol: TCP }
+  egress:
+    # Allow DNS so the Pod can resolve peers/services.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
